@@ -151,13 +151,12 @@ func Generate(cfg config.Config) (Generated, error) {
 	}
 	for _, group := range cfg.Users.Groups {
 		for index := 1; index <= group.Count; index++ {
-			username := fmt.Sprintf("%s-%02d", group.Name, index)
 			userTags := managedTags(append(append([]string(nil), cfg.Konnect.Tags...), group.Name))
 			state.Consumers = append(state.Consumers, consumer{
-				Username: username,
+				Username: group.Username(index),
 				Tags:     userTags,
 				KeyAuthCredential: []credential{{
-					Key:  fmt.Sprintf("%s-%02d", group.KeyPrefix, index),
+					Key:  group.APIKey(index),
 					Tags: userTags,
 				}},
 			})

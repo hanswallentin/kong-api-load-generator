@@ -1,0 +1,73 @@
+# Smoke-test configuration: load goes straight to the built-in mock upstream,
+# so no Kong or Konnect is needed. The token is a placeholder that is never used.
+konnect:
+  tool: kongctl
+  token: smoke-placeholder
+  region: eu
+  control_plane: smoke
+  create_control_plane: true
+  tags: [kong-loadgen]
+
+gateway:
+  proxy_url: http://localhost:9000
+
+upstream:
+  default_url: http://localhost:9000
+
+load:
+  duration: 0
+  ramp_up: 2s
+  max_concurrency: 200
+  jitter: 0.2
+  client:
+    timeout: 5s
+  error_statuses: [500, 502, 503]
+
+users:
+  key_header: apikey
+  groups:
+    - name: mobile-app
+      count: 10
+      key_prefix: mobile
+    - name: partner-portal
+      count: 3
+      key_prefix: partner
+
+endpoints:
+  - name: orders-api
+    path: /orders
+    methods: [POST]
+    frequency: 100
+    error_percentage: 10
+    error_mode: mixed
+    latency_ms: { min: 5, max: 50 }
+    auth: key-auth
+    identity:
+      mode: weighted-groups
+      groups:
+        - { group: mobile-app, weight: 70 }
+        - { group: partner-portal, weight: 30 }
+    body: '{"item":"book"}'
+
+  - name: account
+    path: /account
+    methods: [GET]
+    frequency: 10
+    error_percentage: 0
+    error_mode: mixed
+    latency_ms: { min: 5, max: 50 }
+    auth: key-auth
+    identity:
+      mode: round-robin
+      groups:
+        - { group: mobile-app }
+        - { group: partner-portal }
+
+  - name: catalog
+    path: /catalog
+    methods: [GET]
+    frequency: 20
+    error_percentage: 0
+    error_mode: mixed
+    latency_ms: { min: 5, max: 50 }
+    auth: none

@@ -1,63 +1,91 @@
-# kong-loadgen demo configuration. Use only throwaway demo API keys.
-# Set KONNECT_TOKEN in the environment for Konnect operations; do not commit secrets.
+# kong-loadgen configuration: the single source of truth for the demo.
+#
+# Edit this file, then run:
+#   kong-loadgen configure   (creates the Kong config in Konnect)
+#   kong-loadgen run         (sends the traffic)
+#
+# Use only throwaway demo API keys in this file. Never put a real token here:
+# set KONNECT_TOKEN in your shell instead. See docs/configuration.md for every key.
+
 konnect:
-  tool: kongctl
-  token: ""
-  region: eu
-  control_plane: loadgen-demo
-  create_control_plane: true
-  tags: [kong-loadgen]
+  tool: kongctl                  # kongctl | deck
+  token: ""                      # leave empty and export KONNECT_TOKEN; never commit a token
+  region: eu                     # us | eu | au | me | in (selects the Konnect API URL)
+  control_plane: loadgen-demo    # the control plane the configuration is pushed to
+  create_control_plane: true     # create it if missing (kongctl only; deck needs it to exist)
+  tags: [kong-loadgen]           # added to every object, so teardown removes only these
 
 gateway:
-  proxy_url: http://localhost:8000
-  host_header: null
+  proxy_url: http://localhost:8000   # the Kong data plane that load is sent to
+  host_header: null                  # optional Host header override
 
 upstream:
-  default_url: http://localhost:9000
+  # Where Kong forwards traffic. The built-in mock (kong-loadgen upstream) listens
+  # on this port on all interfaces. A Kong data plane running in Docker must use
+  # host.docker.internal, because localhost there means the container itself.
+  # Kong on the host can use http://localhost:9000 instead.
+  default_url: http://host.docker.internal:9000
 
 load:
-  duration: 0
-  ramp_up: 30s
-  max_concurrency: 200
-  jitter: 0.2
+  duration: 0                    # 0 = run until Ctrl+C
+  ramp_up: 30s                   # linear warm-up from zero to the configured rates
+  max_concurrency: 200           # in-flight request cap; excess requests are counted as dropped
+  jitter: 0.2                    # +-20% timing randomisation so graphs look organic
+  error_statuses: [500, 502, 503] # statuses for upstream-generated errors (400-599)
   client:
     timeout: 10s
 
 users:
-  key_header: apikey
+  key_header: apikey             # header that carries the API key (also set on the key-auth plugin)
   groups:
-    - name: mobile-app
+    - name: mobile-app           # creates mobile-app-01 .. mobile-app-10
       count: 10
-      key_prefix: mobile
-    - name: partner-portal
+      key_prefix: mobile         # keys mobile-01 .. mobile-10
+    - name: partner-portal       # creates partner-portal-01 .. partner-portal-03
       count: 3
-      key_prefix: partner
+      key_prefix: partner        # keys partner-01 .. partner-03
 
 endpoints:
+  # 1. Anonymous and clean: no credentials, no errors.
+  - name: public-catalog
+    path: /catalog
+    methods: [GET]
+    frequency: 5                 # calls per second (or frequency_per_minute, not both)
+    error_percentage: 0          # 0-100: share of requests that should fail
+    auth: none                   # no identity block, so traffic counts as Anonymous
+    error_mode: mixed
+
+  # 2. Ten percent errors, with traffic split between user groups.
   - name: orders-api
     path: /orders
     methods: [GET, POST]
-    upstream_url: null
     frequency: 20
-    error_percentage: 5
-    error_mode: mixed
+    error_percentage: 10
+    error_mode: mixed            # upstream | client | mixed
     latency_ms: { min: 20, max: 300 }
-    auth: key-auth
+    auth: key-auth               # none | key-auth; key-auth needs an identity block
     identity:
-      mode: weighted-groups
-      groups:
+      mode: weighted-groups      # single-user | weighted-groups | round-robin
+      groups:                    # weights are normalised, so they need not add up to 100
         - { group: mobile-app, weight: 70 }
         - { group: partner-portal, weight: 30 }
     headers: { X-Demo: "true" }
     body: '{"item":"book"}'
-    plugins:
-      - name: rate-limiting
-        config: { minute: 600 }
 
-  - name: public-catalog
-    path: /catalog
-    methods: [GET]
-    frequency: 5
-    error_percentage: 0
-    error_mode: mixed
-    auth: none
+  # 3. Key-authenticated and rate limited: every user is limited to 60 calls a minute.
+  - name: checkout-api
+    path: /checkout
+    methods: [POST]
+    frequency: 15
+    error_percentage: 2
+    error_mode: client
+    auth: key-auth
+    identity:
+      mode: round-robin          # every user in the listed groups, in turn
+      groups:
+        - { group: mobile-app }
+        - { group: partner-portal }
+    body: '{"cart":"demo"}'
+    plugins:                     # passed through to Kong on this route
+      - name: rate-limiting
+        config: { minute: 60 }

@@ -11,7 +11,7 @@ test:
 	go test ./...
 
 smoke: build
-	./$(BINARY) run --duration 15s
+	sh scripts/smoke.sh
 
 dist:
 	@mkdir -p dist

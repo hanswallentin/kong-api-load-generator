@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,7 +15,19 @@ type ValidationError struct {
 
 func (e ValidationError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Message) }
 
+// Validate checks the whole configuration, including the Konnect token that
+// configure, teardown and validate need.
 func Validate(cfg Config, root *yaml.Node) []ValidationError {
+	return validate(cfg, root, true)
+}
+
+// ValidateLocal checks everything except the Konnect token, for commands such
+// as run and upstream that never contact Konnect.
+func ValidateLocal(cfg Config, root *yaml.Node) []ValidationError {
+	return validate(cfg, root, false)
+}
+
+func validate(cfg Config, root *yaml.Node, requireToken bool) []ValidationError {
 	var problems []ValidationError
 	add := func(node *yaml.Node, message string) {
 		line := 1
@@ -32,7 +43,7 @@ func Validate(cfg Config, root *yaml.Node) []ValidationError {
 	loadNode := mappingValue(rootMap["load"])
 	usersNode := mappingValue(rootMap["users"])
 
-	if cfg.Konnect.Token == "" {
+	if requireToken && cfg.Konnect.Token == "" {
 		add(konnectNode["token"], "Konnect token is required; set KONNECT_TOKEN or konnect.token")
 	}
 	if cfg.Konnect.Tool != "kongctl" && cfg.Konnect.Tool != "deck" {
@@ -66,6 +77,11 @@ func Validate(cfg Config, root *yaml.Node) []ValidationError {
 	}
 	if cfg.Load.Client.Timeout.Value() <= 0 {
 		add(mappingValue(loadNode["client"])["timeout"], "load.client.timeout must be greater than zero")
+	}
+	for i, status := range cfg.Load.ErrorStatuses {
+		if status < 400 || status > 599 {
+			add(sequenceValue(loadNode["error_statuses"])[i], fmt.Sprintf("load.error_statuses must be HTTP error codes 400-599, got %d", status))
+		}
 	}
 	if !validHeaderName(cfg.EffectiveKeyHeader()) {
 		add(usersNode["key_header"], "users.key_header must be a valid HTTP header name")
@@ -140,7 +156,7 @@ func Validate(cfg Config, root *yaml.Node) []ValidationError {
 			add(fields["latency_ms"], "latency_ms requires 0 <= min <= max")
 		}
 		if endpoint.Identity != nil {
-			validateIdentity(*endpoint.Identity, fields["identity"], groupsByName, add)
+			validateIdentity(*endpoint.Identity, fields["identity"], groupsByName, cfg.Users.Groups, add)
 		}
 	}
 	if len(cfg.Endpoints) == 0 {
@@ -158,25 +174,15 @@ func firstNode(nodes ...*yaml.Node) *yaml.Node {
 	return nil
 }
 
-func validateIdentity(identity IdentityConfig, node *yaml.Node, groups map[string]UserGroup, add func(*yaml.Node, string)) {
+func validateIdentity(identity IdentityConfig, node *yaml.Node, groups map[string]UserGroup, allGroups []UserGroup, add func(*yaml.Node, string)) {
 	fields := mappingValue(node)
 	if !oneOf(identity.Mode, "single-user", "weighted-groups", "round-robin") {
 		add(fields["mode"], "identity.mode must be single-user, weighted-groups, or round-robin")
 		return
 	}
 	if identity.Mode == "single-user" {
-		groupName := ""
-		var group UserGroup
-		for candidateName, candidate := range groups {
-			if strings.HasPrefix(identity.User, candidateName+"-") && len(candidateName) > len(groupName) {
-				groupName = candidateName
-				group = candidate
-			}
-		}
-		if groupName == "" {
-			add(fields["user"], "identity.user must name an existing generated user")
-		} else if !validUserNumber(strings.TrimPrefix(identity.User, groupName+"-"), group.Count) {
-			add(fields["user"], "identity.user must name a generated user within its group's count")
+		if _, _, found := FindUser(allGroups, identity.User); !found {
+			add(fields["user"], "identity.user must name an existing generated user, such as mobile-app-03")
 		}
 		return
 	}
@@ -214,14 +220,6 @@ func validateIdentity(identity IdentityConfig, node *yaml.Node, groups map[strin
 	if identity.Mode == "weighted-groups" && sum <= 0 {
 		add(fields["groups"], "weighted-groups weights must sum to a positive value")
 	}
-}
-
-func validUserNumber(value string, count int) bool {
-	index, err := strconv.Atoi(value)
-	if err != nil {
-		return false
-	}
-	return index > 0 && index <= count
 }
 
 func validHeaderName(value string) bool {

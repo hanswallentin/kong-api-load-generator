@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -41,6 +42,15 @@ type LoadConfig struct {
 	MaxConcurrency int          `yaml:"max_concurrency"`
 	Jitter         float64      `yaml:"jitter"`
 	Client         ClientConfig `yaml:"client"`
+	ErrorStatuses  []int        `yaml:"error_statuses"`
+}
+
+// EffectiveErrorStatuses returns the statuses used for upstream-generated errors.
+func (l LoadConfig) EffectiveErrorStatuses() []int {
+	if len(l.ErrorStatuses) == 0 {
+		return []int{500, 502, 503}
+	}
+	return l.ErrorStatuses
 }
 
 type ClientConfig struct {
@@ -81,6 +91,30 @@ type UserGroup struct {
 	Name      string `yaml:"name"`
 	Count     int    `yaml:"count"`
 	KeyPrefix string `yaml:"key_prefix"`
+}
+
+// Username is the Kong consumer name and load-generator identity for the
+// index-th user (1-based), for example mobile-app-03.
+func (g UserGroup) Username(index int) string {
+	return fmt.Sprintf("%s-%02d", g.Name, index)
+}
+
+// APIKey is the throwaway demo key for the index-th user (1-based), for
+// example mobile-03.
+func (g UserGroup) APIKey(index int) string {
+	return fmt.Sprintf("%s-%02d", g.KeyPrefix, index)
+}
+
+// FindUser locates a generated user by username and returns its group and index.
+func FindUser(groups []UserGroup, username string) (UserGroup, int, bool) {
+	for _, group := range groups {
+		for index := 1; index <= group.Count; index++ {
+			if group.Username(index) == username {
+				return group, index, true
+			}
+		}
+	}
+	return UserGroup{}, 0, false
 }
 
 type Endpoint struct {
@@ -143,6 +177,14 @@ func ApplyEnvironment(cfg *Config) {
 	if region := os.Getenv("KONNECT_REGION"); region != "" {
 		cfg.Konnect.Region = region
 	}
+}
+
+// EffectiveErrorMode returns the endpoint's error mode, defaulting to mixed.
+func (e Endpoint) EffectiveErrorMode() string {
+	if e.ErrorMode == "" {
+		return "mixed"
+	}
+	return e.ErrorMode
 }
 
 func (e Endpoint) RequestsPerSecond() float64 {

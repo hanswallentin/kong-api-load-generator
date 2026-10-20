@@ -6,8 +6,8 @@ import (
 )
 
 func TestRedactRemovesToken(t *testing.T) {
-	got := redact("token kpat_abc in output kpat_abc", "kpat_abc")
-	if strings.Contains(got, "kpat_abc") {
+	got := redact("token secret-abc in output secret-abc", "secret-abc")
+	if strings.Contains(got, "secret-abc") {
 		t.Fatalf("token still present: %q", got)
 	}
 	if got != "token [REDACTED] in output [REDACTED]" {

@@ -108,3 +108,47 @@ func TestValidateRequiresToken(t *testing.T) {
 	}
 	t.Fatalf("expected line-numbered missing token problem, got: %v", problems)
 }
+
+func validationMessages(t *testing.T, source string) []string {
+	t.Helper()
+	cfg, root := parseConfig(t, source)
+	var messages []string
+	for _, problem := range Validate(cfg, root) {
+		messages = append(messages, problem.Error())
+	}
+	return messages
+}
+
+func expectProblem(t *testing.T, source, fragment string) {
+	t.Helper()
+	for _, message := range validationMessages(t, source) {
+		if strings.Contains(message, fragment) {
+			return
+		}
+	}
+	t.Fatalf("expected a problem containing %q, got: %v", fragment, validationMessages(t, source))
+}
+
+func TestValidateRejectsUnknownSingleUser(t *testing.T) {
+	expectProblem(t, strings.Replace(validConfig, "mobile-app-03", "mobile-app-09", 1), "must name an existing generated user")
+}
+
+func TestValidateRejectsErrorStatusOutsideRange(t *testing.T) {
+	expectProblem(t, strings.Replace(validConfig, "  ramp_up: 1s\n", "  ramp_up: 1s\n  error_statuses: [500, 200]\n", 1), "must be HTTP error codes 400-599")
+}
+
+func TestValidateRejectsBothFrequencyFields(t *testing.T) {
+	expectProblem(t, strings.Replace(validConfig, "frequency_per_minute: 60\n", "frequency_per_minute: 60\n    frequency: 1\n", 1), "exactly one of frequency or frequency_per_minute")
+}
+
+func TestValidateRejectsZeroFrequency(t *testing.T) {
+	expectProblem(t, strings.Replace(validConfig, "frequency: 10\n", "frequency: 0\n", 1), "exactly one of frequency or frequency_per_minute")
+}
+
+func TestValidateRejectsErrorPercentageOutOfRange(t *testing.T) {
+	expectProblem(t, strings.Replace(validConfig, "error_percentage: 5\n", "error_percentage: 150\n", 1), "error_percentage must be between 0 and 100")
+}
+
+func TestValidateRejectsUnknownRegion(t *testing.T) {
+	expectProblem(t, strings.Replace(validConfig, "region: eu", "region: mars", 1), "konnect.region must be one of")
+}

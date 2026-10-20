@@ -1,12 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/kong/kong-loadgen/src/config"
 	"github.com/kong/kong-loadgen/src/kong"
+	"github.com/kong/kong-loadgen/src/loadgen"
+	"github.com/kong/kong-loadgen/src/mock"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -41,7 +47,7 @@ func newRootCommand() *cobra.Command {
 		Short: "Validate configuration and report problems with line numbers",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, _, err := readValidatedConfig(cmd)
+			path, _, err := readValidatedConfig(cmd, true)
 			if err != nil {
 				return err
 			}
@@ -54,7 +60,7 @@ func newRootCommand() *cobra.Command {
 		Short: "Generate and synchronize tagged Kong resources to Konnect",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, cfg, err := readValidatedConfig(cmd)
+			path, cfg, err := readValidatedConfig(cmd, true)
 			if err != nil {
 				return err
 			}
@@ -71,7 +77,7 @@ func newRootCommand() *cobra.Command {
 		Short: "Remove Kong resources managed by this configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, cfg, err := readValidatedConfig(cmd)
+			path, cfg, err := readValidatedConfig(cmd, true)
 			if err != nil {
 				return err
 			}
@@ -81,10 +87,96 @@ func newRootCommand() *cobra.Command {
 	}
 	teardown.Flags().Bool("yes", false, "delete without asking for confirmation")
 	root.AddCommand(teardown)
+
+	run := &cobra.Command{
+		Use:   "run",
+		Short: "Generate load according to config.yaml",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, cfg, err := readValidatedConfig(cmd, false)
+			if err != nil {
+				return err
+			}
+			duration, _ := cmd.Flags().GetDuration("duration")
+			jsonSummary, _ := cmd.Flags().GetString("json-summary")
+			verbose, _ := cmd.Flags().GetBool("verbose-identity")
+			seed, _ := cmd.Flags().GetUint64("seed")
+			out := cmd.OutOrStdout()
+
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			summary, err := loadgen.Run(ctx, cfg, loadgen.Options{
+				Duration:        duration,
+				Seed:            seed,
+				VerboseIdentity: verbose,
+				Live:            isTerminal(out),
+				Out:             out,
+			})
+			if err != nil {
+				return err
+			}
+			loadgen.PrintSummary(out, summary)
+			if jsonSummary != "" {
+				if err := writeJSONSummary(jsonSummary, summary); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "Wrote JSON summary to %s\n", jsonSummary)
+			}
+			return nil
+		},
+	}
+	run.Flags().Duration("duration", 0, "stop after this long, for example 10m (overrides load.duration; default runs until Ctrl+C)")
+	run.Flags().String("json-summary", "", "write final statistics to this JSON file")
+	run.Flags().Bool("verbose-identity", false, "break live statistics down per individual user, not just per group")
+	run.Flags().Uint64("seed", 0, "random seed for repeatable runs (0 picks a random seed)")
+	root.AddCommand(run)
+
+	upstream := &cobra.Command{
+		Use:   "upstream",
+		Short: "Start the built-in mock upstream",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, cfg, err := readValidatedConfig(cmd, false)
+			if err != nil {
+				return err
+			}
+			listen, _ := cmd.Flags().GetString("listen")
+			if listen == "" {
+				if listen, err = mock.ListenAddress(cfg.Upstream.DefaultURL); err != nil {
+					return err
+				}
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return mock.Serve(ctx, listen, cfg, cmd.OutOrStdout())
+		},
+	}
+	upstream.Flags().String("listen", "", "address to listen on (defaults to the port in upstream.default_url, on all interfaces)")
+	root.AddCommand(upstream)
 	return root
 }
 
-func readValidatedConfig(cmd *cobra.Command) (string, config.Config, error) {
+func isTerminal(out io.Writer) bool {
+	file, ok := out.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func writeJSONSummary(path string, summary loadgen.Summary) error {
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode summary: %w", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write summary: %w", err)
+	}
+	return nil
+}
+
+func readValidatedConfig(cmd *cobra.Command, requireToken bool) (string, config.Config, error) {
 	path, err := configPath(cmd)
 	if err != nil {
 		return "", config.Config{}, err
@@ -102,7 +194,12 @@ func readValidatedConfig(cmd *cobra.Command) (string, config.Config, error) {
 		return "", config.Config{}, err
 	}
 	config.ApplyEnvironment(&cfg)
-	problems := config.Validate(cfg, documentRoot(&document))
+	var problems []config.ValidationError
+	if requireToken {
+		problems = config.Validate(cfg, documentRoot(&document))
+	} else {
+		problems = config.ValidateLocal(cfg, documentRoot(&document))
+	}
 	if len(problems) > 0 {
 		for _, problem := range problems {
 			fmt.Fprintln(cmd.ErrOrStderr(), problem.Error())
