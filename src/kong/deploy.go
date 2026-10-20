@@ -31,9 +31,18 @@ func Configure(ctx context.Context, cfg config.Config, configPath string, dryRun
 		return err
 	}
 	if cfg.Konnect.Tool == "kongctl" {
-		return configureWithKongctl(ctx, cfg, directory, dryRun, output)
+		err = configureWithKongctl(ctx, cfg, directory, dryRun, output)
+	} else {
+		err = configureWithDeck(ctx, cfg, directory, dryRun, output)
 	}
-	return configureWithDeck(ctx, cfg, directory, dryRun, output)
+	if err != nil || dryRun {
+		return err
+	}
+	parts, err := Fingerprint(cfg)
+	if err != nil {
+		return err
+	}
+	return recordApplied(directory, parts)
 }
 
 // Teardown removes only the entities tagged kong-loadgen. The control plane is
@@ -53,7 +62,7 @@ func Teardown(ctx context.Context, cfg config.Config, configPath string, assumeY
 	}
 	if !found {
 		fmt.Fprintf(output, "Control plane %q does not exist; nothing to tear down.\n", cfg.Konnect.ControlPlane)
-		return nil
+		return clearApplied(directory)
 	}
 	if ownsControlPlane && controlPlane.Labels["managed-by"] != ManagedTag {
 		return fmt.Errorf("control plane %q was not created by kong-loadgen (missing label managed-by=%s); refusing to delete it", cfg.Konnect.ControlPlane, ManagedTag)
@@ -80,15 +89,14 @@ func Teardown(ctx context.Context, cfg config.Config, configPath string, assumeY
 	if err := runDeck(ctx, cfg, output, "gateway", "sync", "--select-tag", ManagedTag, "--yes", state); err != nil {
 		return err
 	}
-	if !ownsControlPlane {
-		return nil
+	if ownsControlPlane {
+		manifest := filepath.Join(directory, "control-plane.yaml")
+		if err := runKongctl(ctx, cfg, output, "delete", "--filename", manifest, "--auto-approve"); err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Deleted control plane %q.\n", cfg.Konnect.ControlPlane)
 	}
-	manifest := filepath.Join(directory, "control-plane.yaml")
-	if err := runKongctl(ctx, cfg, output, "delete", "--filename", manifest, "--auto-approve"); err != nil {
-		return err
-	}
-	fmt.Fprintf(output, "Deleted control plane %q.\n", cfg.Konnect.ControlPlane)
-	return nil
+	return clearApplied(directory)
 }
 
 func configureWithKongctl(ctx context.Context, cfg config.Config, directory string, dryRun bool, output io.Writer) error {
@@ -135,7 +143,7 @@ func writeGeneratedFiles(cfg config.Config, configPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	directory := filepath.Join(filepath.Dir(configPath), "generated")
+	directory := generatedDirectory(configPath)
 	if err := writeGenerated(directory, generated); err != nil {
 		return "", err
 	}

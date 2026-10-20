@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/kong/kong-loadgen/src/config"
 	"github.com/kong/kong-loadgen/src/kong"
 	"github.com/kong/kong-loadgen/src/loadgen"
 	"github.com/kong/kong-loadgen/src/mock"
+	"github.com/kong/kong-loadgen/src/watch"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -93,7 +96,7 @@ func newRootCommand() *cobra.Command {
 		Short: "Generate load according to config.yaml",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, cfg, err := readValidatedConfig(cmd, false)
+			path, cfg, err := readValidatedConfig(cmd, false)
 			if err != nil {
 				return err
 			}
@@ -102,20 +105,31 @@ func newRootCommand() *cobra.Command {
 			verbose, _ := cmd.Flags().GetBool("verbose-identity")
 			seed, _ := cmd.Flags().GetUint64("seed")
 			out := cmd.OutOrStdout()
+			color := isTerminal(out) && os.Getenv("NO_COLOR") == ""
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			reload := reloadSignals(ctx, cmd, path)
 			summary, err := loadgen.Run(ctx, cfg, loadgen.Options{
 				Duration:        duration,
 				Seed:            seed,
 				VerboseIdentity: verbose,
 				Live:            isTerminal(out),
+				Color:           color,
 				Out:             out,
+				Reload:          reload,
+				LoadConfig: func() (config.Config, error) {
+					_, reloaded, err := readValidatedConfig(cmd, false)
+					return reloaded, err
+				},
+				DriftCheck: func(current config.Config) []string {
+					return driftNotes(current, path)
+				},
 			})
 			if err != nil {
 				return err
 			}
-			loadgen.PrintSummary(out, summary)
+			loadgen.PrintSummary(out, color, summary)
 			if jsonSummary != "" {
 				if err := writeJSONSummary(jsonSummary, summary); err != nil {
 					return err
@@ -154,6 +168,53 @@ func newRootCommand() *cobra.Command {
 	upstream.Flags().String("listen", "", "address to listen on (defaults to the port in upstream.default_url, on all interfaces)")
 	root.AddCommand(upstream)
 	return root
+}
+
+// reloadSignals merges file changes and SIGHUP into one reload channel. A
+// reload is requested with `kill -HUP <pid>` or by saving the config file.
+func reloadSignals(ctx context.Context, cmd *cobra.Command, path string) <-chan struct{} {
+	reload := make(chan struct{}, 1)
+	request := func() {
+		select {
+		case reload <- struct{}{}:
+		default:
+		}
+	}
+	changes, err := watch.File(ctx, path)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: file watching unavailable (%v); send SIGHUP to reload\n", err)
+	}
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGHUP)
+	go func() {
+		defer signal.Stop(hangup)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-changes:
+				request()
+			case <-hangup:
+				request()
+			}
+		}
+	}()
+	return reload
+}
+
+// driftNotes explains what configure still has to push, or returns nil when Konnect matches.
+func driftNotes(cfg config.Config, path string) []string {
+	drift, err := kong.CheckDrift(cfg, path)
+	if err != nil {
+		return []string{fmt.Sprintf("could not compare with the last configure: %v", err)}
+	}
+	if drift.NeverConfigured {
+		return []string{"configure has not been run for this configuration; run: kong-loadgen configure"}
+	}
+	if len(drift.Changed) > 0 {
+		return []string{fmt.Sprintf("changed since the last configure: %s; run: kong-loadgen configure (traffic for these still goes to the old Konnect config)", strings.Join(drift.Changed, ", "))}
+	}
+	return nil
 }
 
 func isTerminal(out io.Writer) bool {

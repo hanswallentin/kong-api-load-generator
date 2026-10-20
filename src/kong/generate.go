@@ -1,6 +1,9 @@
 package kong
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -95,7 +98,9 @@ type deckIntegration struct {
 	Flags []string `yaml:"flags"`
 }
 
-func Generate(cfg config.Config) (Generated, error) {
+// build turns the configuration into the decK state and the control-plane
+// entry. Generate encodes it to files; Fingerprint hashes its parts.
+func build(cfg config.Config) (deckState, controlPlane, error) {
 	tags := managedTags(cfg.Konnect.Tags)
 	state := deckState{
 		FormatVersion: "3.0",
@@ -108,7 +113,7 @@ func Generate(cfg config.Config) (Generated, error) {
 		}
 		serviceURL, err := joinServiceURL(upstream, endpoint.Path)
 		if err != nil {
-			return Generated{}, fmt.Errorf("endpoint %q upstream URL: %w", endpoint.Name, err)
+			return deckState{}, controlPlane{}, fmt.Errorf("endpoint %q upstream URL: %w", endpoint.Name, err)
 		}
 		methods := endpoint.Methods
 		if len(methods) == 0 {
@@ -162,17 +167,7 @@ func Generate(cfg config.Config) (Generated, error) {
 			})
 		}
 	}
-	deckBytes, err := marshalYAML(state)
-	if err != nil {
-		return Generated{}, fmt.Errorf("encode decK state: %w", err)
-	}
-	teardownBytes, err := marshalYAML(deckState{
-		FormatVersion: "3.0",
-		Info:          deckInfo{SelectTags: []string{ManagedTag}},
-	})
-	if err != nil {
-		return Generated{}, fmt.Errorf("encode decK teardown state: %w", err)
-	}
+
 	control := controlPlane{
 		Ref:  cfg.Konnect.ControlPlane,
 		Deck: &deckIntegration{Files: []string{"kong.yaml"}, Flags: []string{"--select-tag=" + ManagedTag}},
@@ -185,6 +180,26 @@ func Generate(cfg config.Config) (Generated, error) {
 	} else {
 		control.External = &externalResource{Selector: externalSelector{MatchFields: map[string]string{"name": cfg.Konnect.ControlPlane}}}
 	}
+	return state, control, nil
+}
+
+// Generate encodes the configuration into the files configure and teardown use.
+func Generate(cfg config.Config) (Generated, error) {
+	state, control, err := build(cfg)
+	if err != nil {
+		return Generated{}, err
+	}
+	deckBytes, err := marshalYAML(state)
+	if err != nil {
+		return Generated{}, fmt.Errorf("encode decK state: %w", err)
+	}
+	teardownBytes, err := marshalYAML(deckState{
+		FormatVersion: "3.0",
+		Info:          deckInfo{SelectTags: []string{ManagedTag}},
+	})
+	if err != nil {
+		return Generated{}, fmt.Errorf("encode decK teardown state: %w", err)
+	}
 	kongctlBytes, err := marshalYAML(kongctlFile{ControlPlanes: []controlPlane{control}})
 	if err != nil {
 		return Generated{}, fmt.Errorf("encode kongctl config: %w", err)
@@ -195,6 +210,35 @@ func Generate(cfg config.Config) (Generated, error) {
 		return Generated{}, fmt.Errorf("encode control-plane teardown config: %w", err)
 	}
 	return Generated{DeckState: deckBytes, DeckTeardown: teardownBytes, KongctlConfig: kongctlBytes, ControlPlane: controlPlaneBytes}, nil
+}
+
+// Parts names the pieces of the Konnect configuration that configure pushes.
+// Drift is reported per part, so run can say exactly what needs configure.
+var Parts = []string{"services and routes", "plugins", "consumers and API keys", "control plane"}
+
+// Fingerprint returns a hash for each part of the Konnect configuration.
+func Fingerprint(cfg config.Config) (map[string]string, error) {
+	state, control, err := build(cfg)
+	if err != nil {
+		return nil, err
+	}
+	control.Deck = nil
+	values := map[string]any{
+		"services and routes":    state.Services,
+		"plugins":                state.Plugins,
+		"consumers and API keys": state.Consumers,
+		"control plane":          control,
+	}
+	parts := make(map[string]string, len(values))
+	for name, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("fingerprint %s: %w", name, err)
+		}
+		sum := sha256.Sum256(encoded)
+		parts[name] = hex.EncodeToString(sum[:])
+	}
+	return parts, nil
 }
 
 func marshalYAML(value any) ([]byte, error) {

@@ -1,6 +1,7 @@
 package loadgen
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,7 +21,8 @@ func attributionFixture(t *testing.T) (*runner, map[string]*target) {
 	cfg := attributionConfig()
 	cfg.Gateway.ProxyURL = server.URL
 	cfg.Load.ErrorStatuses = []int{503}
-	targets, _, err := buildTargets(cfg)
+	src := newSource(9)
+	targets, err := buildTargets(cfg, src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,11 +31,13 @@ func attributionFixture(t *testing.T) (*runner, map[string]*target) {
 		byName[target.name] = target
 	}
 	r := &runner{
-		cfg:    cfg,
-		src:    newSource(9),
-		client: newClient(5*time.Second, 4),
-		stats:  newCollector(newSource(9), true),
-		sem:    make(chan struct{}, 4),
+		cfg:     cfg,
+		src:     src,
+		client:  newClient(5*time.Second, 4),
+		stats:   newCollector(src, true),
+		sem:     make(chan struct{}, 4),
+		targets: byName,
+		ctx:     context.Background(),
 	}
 	return r, byName
 }
