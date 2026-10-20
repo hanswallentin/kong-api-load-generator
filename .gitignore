@@ -1,0 +1,7 @@
+/kong-loadgen
+/dist/
+/generated/
+*.state
+.env
+.env.*
+!.env.example

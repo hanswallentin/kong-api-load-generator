@@ -1,0 +1,63 @@
+# kong-loadgen demo configuration. Use only throwaway demo API keys.
+# Set KONNECT_TOKEN in the environment for Konnect operations; do not commit secrets.
+konnect:
+  tool: kongctl
+  token: ""
+  region: eu
+  control_plane: loadgen-demo
+  create_control_plane: true
+  tags: [kong-loadgen]
+
+gateway:
+  proxy_url: http://localhost:8000
+  host_header: null
+
+upstream:
+  default_url: http://localhost:9000
+
+load:
+  duration: 0
+  ramp_up: 30s
+  max_concurrency: 200
+  jitter: 0.2
+  client:
+    timeout: 10s
+
+users:
+  key_header: apikey
+  groups:
+    - name: mobile-app
+      count: 10
+      key_prefix: mobile
+    - name: partner-portal
+      count: 3
+      key_prefix: partner
+
+endpoints:
+  - name: orders-api
+    path: /orders
+    methods: [GET, POST]
+    upstream_url: null
+    frequency: 20
+    error_percentage: 5
+    error_mode: mixed
+    latency_ms: { min: 20, max: 300 }
+    auth: key-auth
+    identity:
+      mode: weighted-groups
+      groups:
+        - { group: mobile-app, weight: 70 }
+        - { group: partner-portal, weight: 30 }
+    headers: { X-Demo: "true" }
+    body: '{"item":"book"}'
+    plugins:
+      - name: rate-limiting
+        config: { minute: 600 }
+
+  - name: public-catalog
+    path: /catalog
+    methods: [GET]
+    frequency: 5
+    error_percentage: 0
+    error_mode: mixed
+    auth: none
