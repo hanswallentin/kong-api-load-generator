@@ -114,6 +114,46 @@ The gateway part is listed only once the control plane exists. For a control pla
 
 Running `configure` again with nothing changed reports `No changes detected` and does nothing. Removing an endpoint, group or user from `config.yaml` and running `configure` again removes it from Konnect.
 
+### configure --with-apis
+
+Also creates one Konnect API per endpoint, so Konnect Analytics shows API-level traffic alongside the consumer view. Each API is named after its endpoint, with the description and OpenAPI spec from `apis.yaml`, and it is linked to the gateway service that serves the endpoint.
+
+```sh
+kong-loadgen apis init                 # write apis.yaml, once
+kong-loadgen configure --with-apis     # create the APIs as well
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--with-apis` | Create the APIs. Without it, `apis.yaml` is not read and no APIs are touched. |
+| `--apis-file <path>` | Read this file instead of `apis.yaml` beside `config.yaml`. |
+
+The APIs live in their own kongctl namespace, `kong-loadgen-apis`, so a plain `configure` never deletes them. Removing an endpoint from `apis.yaml` and running `configure --with-apis` removes its API. `--dry-run` and `--generate-only` work as they do for the gateway. The spec for each API is written inline into `generated/kongctl-apis.yaml`.
+
+## apis
+
+### apis init
+
+Writes `apis.yaml` with a generated description (about 50 words) and an OpenAPI 3.0 spec (about 1.5 kB) for every endpoint in `config.yaml`. Each spec contains the endpoint's path and methods.
+
+| Flag | Meaning |
+| --- | --- |
+| `--force` | Replace an existing `apis.yaml`. Without it, the command refuses to overwrite the file. |
+| `--apis-file <path>` | Write to this file instead of `apis.yaml` beside `config.yaml`. |
+
+The file has one entry per endpoint:
+
+```yaml
+apis:
+  - endpoint: orders-api              # the API is named after the endpoint
+    description: Sample API for the orders-api endpoint, used for Konnect Analytics demos. ...
+    spec: |
+      openapi: 3.0.3
+      ...
+```
+
+Edit `description` and `spec` freely. The content is only for the API page in Konnect: the traffic is the same whatever the spec says. An endpoint that has no entry in `apis.yaml` gets a generated template at `configure --with-apis` time, with a warning.
+
 ## teardown
 
 Removes only what this tool created: the Gateway entities tagged with `konnect.tags`, and the control plane when `create_control_plane` is true and the control plane carries the `managed-by: kong-loadgen` label. A control plane that already existed is never deleted.
@@ -126,6 +166,8 @@ Removes only what this tool created: the Gateway entities tagged with `konnect.t
 kong-loadgen teardown          # shows what will be deleted, then asks: Type yes to delete these resources
 kong-loadgen teardown --yes    # no prompt
 ```
+
+`teardown --with-apis` also deletes the Konnect APIs named after the endpoints. It deletes only those that carry the `managed-by: kong-loadgen` label, and refuses to delete an API that another person created with the same name. The APIs are deleted before the gateway entities, and one confirmation covers everything. A plain `teardown` leaves the APIs in place.
 
 Teardown is safe to run twice. When the control plane is already gone it prints this and exits zero:
 

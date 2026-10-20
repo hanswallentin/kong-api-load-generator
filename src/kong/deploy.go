@@ -45,9 +45,16 @@ func Configure(ctx context.Context, cfg config.Config, configPath string, dryRun
 	return recordApplied(directory, parts)
 }
 
-// Teardown removes only the entities tagged kong-loadgen. The control plane is
-// deleted too, but only when this tool created it.
-func Teardown(ctx context.Context, cfg config.Config, configPath string, assumeYes bool, output io.Writer, input io.Reader) error {
+// TeardownOptions controls Teardown.
+type TeardownOptions struct {
+	AssumeYes bool     // delete without the confirmation prompt
+	APINames  []string // Konnect APIs to delete too; empty unless --with-apis
+}
+
+// Teardown removes only what this tool created: the Konnect APIs it named, the
+// Gateway entities tagged kong-loadgen, and the control plane when this tool
+// created it. Previews are shown first, and one confirmation covers them all.
+func Teardown(ctx context.Context, cfg config.Config, configPath string, opts TeardownOptions, output io.Writer, input io.Reader) error {
 	directory, err := writeGeneratedFiles(cfg, configPath)
 	if err != nil {
 		return err
@@ -60,23 +67,44 @@ func Teardown(ctx context.Context, cfg config.Config, configPath string, assumeY
 	if err != nil {
 		return err
 	}
-	if !found {
+	if found && ownsControlPlane && controlPlane.Labels["managed-by"] != ManagedTag {
+		return fmt.Errorf("control plane %q was not created by kong-loadgen (missing label managed-by=%s); refusing to delete it", cfg.Konnect.ControlPlane, ManagedTag)
+	}
+	doomedAPIs, err := apisToDelete(ctx, cfg, opts.APINames)
+	if err != nil {
+		return err
+	}
+	if !found && len(doomedAPIs) == 0 {
 		fmt.Fprintf(output, "Control plane %q does not exist; nothing to tear down.\n", cfg.Konnect.ControlPlane)
 		return clearApplied(directory)
 	}
-	if ownsControlPlane && controlPlane.Labels["managed-by"] != ManagedTag {
-		return fmt.Errorf("control plane %q was not created by kong-loadgen (missing label managed-by=%s); refusing to delete it", cfg.Konnect.ControlPlane, ManagedTag)
+
+	apiDeletePath := filepath.Join(directory, apisDeleteFile)
+	if len(doomedAPIs) > 0 {
+		manifest, err := APIsDeleteManifest(doomedAPIs)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(apiDeletePath, manifest, 0o600); err != nil {
+			return fmt.Errorf("write generated/%s: %w", apisDeleteFile, err)
+		}
+		fmt.Fprintf(output, "Planned removal of APIs: %s\n", strings.Join(doomedAPIs, ", "))
+		if err := runKongctl(ctx, cfg, output, "diff", "--mode", "delete", "--filename", apiDeletePath); err != nil {
+			return err
+		}
 	}
 
 	state := filepath.Join(directory, "teardown.yaml")
-	fmt.Fprintln(output, "Planned removal of Gateway entities tagged kong-loadgen:")
-	if err := runDeck(ctx, cfg, output, "gateway", "diff", "--select-tag", ManagedTag, state); err != nil {
-		return err
+	if found {
+		fmt.Fprintln(output, "Planned removal of Gateway entities tagged kong-loadgen:")
+		if err := runDeck(ctx, cfg, output, "gateway", "diff", "--select-tag", ManagedTag, state); err != nil {
+			return err
+		}
+		if ownsControlPlane {
+			fmt.Fprintf(output, "Control plane %q will also be deleted.\n", cfg.Konnect.ControlPlane)
+		}
 	}
-	if ownsControlPlane {
-		fmt.Fprintf(output, "Control plane %q will also be deleted.\n", cfg.Konnect.ControlPlane)
-	}
-	if !assumeYes {
+	if !opts.AssumeYes {
 		confirmed, err := confirm(input, output)
 		if err != nil {
 			return err
@@ -86,15 +114,24 @@ func Teardown(ctx context.Context, cfg config.Config, configPath string, assumeY
 			return nil
 		}
 	}
-	if err := runDeck(ctx, cfg, output, "gateway", "sync", "--select-tag", ManagedTag, "--yes", state); err != nil {
-		return err
-	}
-	if ownsControlPlane {
-		manifest := filepath.Join(directory, "control-plane.yaml")
-		if err := runKongctl(ctx, cfg, output, "delete", "--filename", manifest, "--auto-approve"); err != nil {
+
+	if len(doomedAPIs) > 0 {
+		// APIs go first: their implementations refer to the gateway services.
+		if err := runKongctl(ctx, cfg, output, "delete", "--filename", apiDeletePath, "--auto-approve"); err != nil {
 			return err
 		}
-		fmt.Fprintf(output, "Deleted control plane %q.\n", cfg.Konnect.ControlPlane)
+	}
+	if found {
+		if err := runDeck(ctx, cfg, output, "gateway", "sync", "--select-tag", ManagedTag, "--yes", state); err != nil {
+			return err
+		}
+		if ownsControlPlane {
+			manifest := filepath.Join(directory, "control-plane.yaml")
+			if err := runKongctl(ctx, cfg, output, "delete", "--filename", manifest, "--auto-approve"); err != nil {
+				return err
+			}
+			fmt.Fprintf(output, "Deleted control plane %q.\n", cfg.Konnect.ControlPlane)
+		}
 	}
 	return clearApplied(directory)
 }

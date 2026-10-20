@@ -1,0 +1,228 @@
+# APIs created in Konnect by configure --with-apis, one per endpoint.
+# Edit the description and spec freely. The API is named after its endpoint.
+apis:
+  - endpoint: public-catalog
+    description: Sample API for the public-catalog endpoint, used for Konnect Analytics demos. It exposes GET /catalog and returns JSON with standard status codes. The Kong gateway serves each call and attributes it to the consumer that made it, so traffic can be broken down per user and per group. The data is synthetic.
+    spec: |
+      components:
+        responses:
+          NotFound:
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+            description: Resource not found
+          Unauthorized:
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+            description: Missing or invalid API key
+        schemas:
+          Error:
+            properties:
+              message:
+                type: string
+            required:
+              - message
+            type: object
+          Item:
+            properties:
+              id:
+                format: uuid
+                type: string
+              name:
+                type: string
+              status:
+                enum:
+                  - active
+                  - pending
+                  - closed
+                type: string
+            required:
+              - id
+              - name
+            type: object
+      info:
+        description: Sample API for the public-catalog endpoint.
+        title: public-catalog
+        version: 1.0.0
+      openapi: 3.0.3
+      paths:
+        /catalog:
+          get:
+            operationId: public-catalog-get
+            responses:
+              "200":
+                content:
+                  application/json:
+                    schema:
+                      items:
+                        $ref: '#/components/schemas/Item'
+                      type: array
+                description: OK
+              "401":
+                $ref: '#/components/responses/Unauthorized'
+              "404":
+                $ref: '#/components/responses/NotFound'
+            summary: GET /catalog
+      servers:
+        - url: https://api.example.com
+  - endpoint: orders-api
+    description: Sample API for the orders-api endpoint, used for Konnect Analytics demos. It exposes GET and POST /orders and returns JSON with standard status codes. The Kong gateway serves each call and attributes it to the consumer that made it, so traffic can be broken down per user and per group. The data is synthetic.
+    spec: |
+      components:
+        responses:
+          NotFound:
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+            description: Resource not found
+          Unauthorized:
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+            description: Missing or invalid API key
+        schemas:
+          Error:
+            properties:
+              message:
+                type: string
+            required:
+              - message
+            type: object
+          Item:
+            properties:
+              id:
+                format: uuid
+                type: string
+              name:
+                type: string
+              status:
+                enum:
+                  - active
+                  - pending
+                  - closed
+                type: string
+            required:
+              - id
+              - name
+            type: object
+      info:
+        description: Sample API for the orders-api endpoint.
+        title: orders-api
+        version: 1.0.0
+      openapi: 3.0.3
+      paths:
+        /orders:
+          get:
+            operationId: orders-api-get
+            responses:
+              "200":
+                content:
+                  application/json:
+                    schema:
+                      items:
+                        $ref: '#/components/schemas/Item'
+                      type: array
+                description: OK
+              "401":
+                $ref: '#/components/responses/Unauthorized'
+              "404":
+                $ref: '#/components/responses/NotFound'
+            summary: GET /orders
+          post:
+            operationId: orders-api-post
+            requestBody:
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/Item'
+              required: true
+            responses:
+              "201":
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/Item'
+                description: Created
+              "401":
+                $ref: '#/components/responses/Unauthorized'
+              "404":
+                $ref: '#/components/responses/NotFound'
+            summary: POST /orders
+      servers:
+        - url: https://api.example.com
+  - endpoint: checkout-api
+    description: Sample API for the checkout-api endpoint, used for Konnect Analytics demos. It exposes POST /checkout and returns JSON with standard status codes. The Kong gateway serves each call and attributes it to the consumer that made it, so traffic can be broken down per user and per group. The data is synthetic.
+    spec: |
+      components:
+        responses:
+          NotFound:
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+            description: Resource not found
+          Unauthorized:
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+            description: Missing or invalid API key
+        schemas:
+          Error:
+            properties:
+              message:
+                type: string
+            required:
+              - message
+            type: object
+          Item:
+            properties:
+              id:
+                format: uuid
+                type: string
+              name:
+                type: string
+              status:
+                enum:
+                  - active
+                  - pending
+                  - closed
+                type: string
+            required:
+              - id
+              - name
+            type: object
+      info:
+        description: Sample API for the checkout-api endpoint.
+        title: checkout-api
+        version: 1.0.0
+      openapi: 3.0.3
+      paths:
+        /checkout:
+          post:
+            operationId: checkout-api-post
+            requestBody:
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/Item'
+              required: true
+            responses:
+              "201":
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/Item'
+                description: Created
+              "401":
+                $ref: '#/components/responses/Unauthorized'
+              "404":
+                $ref: '#/components/responses/NotFound'
+            summary: POST /checkout
+      servers:
+        - url: https://api.example.com

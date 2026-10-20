@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/kong/kong-loadgen/src/apis"
 	"github.com/kong/kong-loadgen/src/config"
 	"github.com/kong/kong-loadgen/src/kong"
 	"github.com/kong/kong-loadgen/src/loadgen"
@@ -89,7 +91,8 @@ endpoint, group or user from config.yaml and running it again removes it from Ko
 Examples:
   kong-loadgen configure --dry-run      show the planned changes and stop
   kong-loadgen configure --generate-only   write generated/ without contacting Konnect
-  kong-loadgen configure                apply the changes`,
+  kong-loadgen configure                apply the changes
+  kong-loadgen configure --with-apis    also create one Konnect API per endpoint, from apis.yaml`,
 		Short: "Generate and synchronize tagged Kong resources to Konnect",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -100,17 +103,36 @@ Examples:
 				return err
 			}
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			return kong.Configure(cmd.Context(), cfg, path, dryRun, generateOnly, cmd.OutOrStdout())
+			withAPIs, _ := cmd.Flags().GetBool("with-apis")
+			var items []apis.API
+			if withAPIs {
+				// Read the APIs file before anything changes, so a mistake in it costs nothing.
+				if items, err = readAPIs(cmd, cfg, apisPath(cmd, path)); err != nil {
+					return err
+				}
+			}
+			if err := kong.Configure(cmd.Context(), cfg, path, dryRun, generateOnly, cmd.OutOrStdout()); err != nil {
+				return err
+			}
+			if !withAPIs {
+				return nil
+			}
+			return kong.ConfigureAPIs(cmd.Context(), cfg, path, items, dryRun, generateOnly, cmd.OutOrStdout())
 		},
 	}
 	configure.Flags().Bool("dry-run", false, "show planned changes without applying them")
 	configure.Flags().Bool("generate-only", false, "write generated files without contacting Konnect")
+	addAPIFlags(configure)
 	root.AddCommand(configure)
 	teardown := &cobra.Command{
 		Use: "teardown",
 		Long: `Removes only the Gateway entities tagged with konnect.tags, and deletes the control
 plane when this tool created it (it carries the managed-by: kong-loadgen label).
-It shows what it will delete and asks for confirmation. Use --yes to skip the prompt.`,
+It shows what it will delete and asks for confirmation. Use --yes to skip the prompt.
+
+With --with-apis it also deletes the Konnect APIs named after the endpoints, but only
+those that carry the managed-by: kong-loadgen label. They are deleted before the
+gateway entities, and one confirmation covers everything.`,
 		Short: "Remove Kong resources managed by this configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -119,11 +141,19 @@ It shows what it will delete and asks for confirmation. Use --yes to skip the pr
 				return err
 			}
 			assumeYes, _ := cmd.Flags().GetBool("yes")
-			return kong.Teardown(cmd.Context(), cfg, path, assumeYes, cmd.OutOrStdout(), cmd.InOrStdin())
+			opts := kong.TeardownOptions{AssumeYes: assumeYes}
+			if withAPIs, _ := cmd.Flags().GetBool("with-apis"); withAPIs {
+				for _, endpoint := range cfg.Endpoints {
+					opts.APINames = append(opts.APINames, endpoint.Name)
+				}
+			}
+			return kong.Teardown(cmd.Context(), cfg, path, opts, cmd.OutOrStdout(), cmd.InOrStdin())
 		},
 	}
 	teardown.Flags().Bool("yes", false, "delete without asking for confirmation")
+	addAPIFlags(teardown)
 	root.AddCommand(teardown)
+	root.AddCommand(newAPIsCommand())
 
 	run := &cobra.Command{
 		Use: "run",
@@ -263,6 +293,41 @@ func driftNotes(cfg config.Config, path string) []string {
 	return nil
 }
 
+// addAPIFlags adds the flags that switch on the Konnect APIs.
+func addAPIFlags(command *cobra.Command) {
+	command.Flags().Bool("with-apis", false, "include one Konnect API per endpoint, described in apis.yaml")
+	command.Flags().String("apis-file", "", "APIs file to read with --with-apis (defaults to apis.yaml beside config.yaml)")
+}
+
+// apisPath returns the APIs file: --apis-file if given, else apis.yaml beside the config.
+func apisPath(cmd *cobra.Command, configPath string) string {
+	if path, _ := cmd.Flags().GetString("apis-file"); path != "" {
+		return path
+	}
+	return filepath.Join(filepath.Dir(configPath), apis.DefaultFile)
+}
+
+// readAPIs reads and validates the APIs file, printing problems with line numbers.
+// Endpoints without an entry are filled from the generated template, and reported.
+func readAPIs(cmd *cobra.Command, cfg config.Config, path string) ([]apis.API, error) {
+	file, root, err := apis.Read(path)
+	if err != nil {
+		return nil, err
+	}
+	problems := apis.Validate(cfg, file, root)
+	if len(problems) > 0 {
+		for _, problem := range problems {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", path, problem.Error())
+		}
+		return nil, fmt.Errorf("%s has %d problem(s)", path, len(problems))
+	}
+	items, notes := apis.Resolve(cfg, file)
+	for _, note := range notes {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", note)
+	}
+	return items, nil
+}
+
 func isTerminal(out io.Writer) bool {
 	file, ok := out.(*os.File)
 	if !ok {
@@ -333,4 +398,58 @@ func documentRoot(document *yaml.Node) *yaml.Node {
 		return document.Content[0]
 	}
 	return document
+}
+
+// newAPIsCommand groups the commands that work with apis.yaml.
+func newAPIsCommand() *cobra.Command {
+	command := &cobra.Command{
+		Use:   "apis",
+		Short: "Work with the APIs file used by --with-apis",
+		Args:  cobra.NoArgs,
+	}
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Write apis.yaml with a description and spec template for every endpoint",
+		Long: `Writes apis.yaml with a generated description and OpenAPI spec for every endpoint in
+config.yaml. Edit the file afterwards, then run configure --with-apis. Refuses to overwrite
+an existing file unless --force is given.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := readValidatedConfig(cmd, false)
+			if err != nil {
+				return err
+			}
+			target := apisPath(cmd, path)
+			force, _ := cmd.Flags().GetBool("force")
+			if _, err := os.Stat(target); err == nil && !force {
+				return fmt.Errorf("%s already exists; edit it, or pass --force to replace it", target)
+			}
+			file := apis.File{}
+			for _, endpoint := range cfg.Endpoints {
+				description, spec := apis.Template(endpoint)
+				file.APIs = append(file.APIs, apis.Entry{Endpoint: endpoint.Name, Description: description, Spec: spec})
+			}
+			var buffer bytes.Buffer
+			encoder := yaml.NewEncoder(&buffer)
+			encoder.SetIndent(2)
+			if err := encoder.Encode(file); err != nil {
+				return fmt.Errorf("encode %s: %w", target, err)
+			}
+			if err := encoder.Close(); err != nil {
+				return fmt.Errorf("encode %s: %w", target, err)
+			}
+			data := buffer.Bytes()
+			header := "# APIs created in Konnect by configure --with-apis, one per endpoint.\n" +
+				"# Edit the description and spec freely. The API is named after its endpoint.\n"
+			if err := os.WriteFile(target, append([]byte(header), data...), 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", target, err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %d API(s) to %s\n", len(file.APIs), target)
+			return nil
+		},
+	}
+	initCmd.Flags().Bool("force", false, "replace an existing apis.yaml")
+	initCmd.Flags().String("apis-file", "", "where to write the file (defaults to apis.yaml beside config.yaml)")
+	command.AddCommand(initCmd)
+	return command
 }

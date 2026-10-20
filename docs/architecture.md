@@ -50,6 +50,8 @@ Each endpoint has one scheduler goroutine and one `target`. The target holds its
 
 The token goes to kongctl through `KONGCTL_DEFAULT_KONNECT_PAT`, and to decK through a 0600 temporary file that is removed afterwards. Output from both tools goes through `redact` before it is printed.
 
+With `--with-apis`, configure also applies a second kongctl manifest, `kongctl-apis.yaml`, in the `kong-loadgen-apis` namespace. It names the control plane and each gateway service by an `_external` selector, so each API is implemented by the service that serves its endpoint. The spec is inline, because kongctl's `!file` content produced specs that Konnect rejected. Teardown deletes the APIs first, by name, from a manifest that needs no control plane.
+
 `teardown` runs decK with an empty tagged state to remove the gateway entities, and deletes the control plane only if it carries the `managed-by: kong-loadgen` label.
 
 ## Design decisions

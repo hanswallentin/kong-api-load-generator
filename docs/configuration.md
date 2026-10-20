@@ -266,6 +266,18 @@ deck gateway dump --konnect-addr https://eu.api.konghq.com \
 
 To see traffic per consumer, open Konnect Analytics, go to the Explorer, and group by **Consumer**. The Explorer groups and filters by consumer, route, status code and gateway service, according to [Konnect's Explorer docs](https://developer.konghq.com/advanced-analytics/explorer/).
 
+## apis.yaml (with --with-apis only)
+
+`apis.yaml` is read only by `configure --with-apis`, `teardown --with-apis` (which takes the endpoint names from `config.yaml`) and `apis init`. It is not part of `config.yaml`.
+
+| Key | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `apis[].endpoint` | string | yes | An endpoint name from `config.yaml`. Each endpoint appears at most once. |
+| `apis[].description` | string | yes | The API description. About 50 words is typical. |
+| `apis[].spec` | string | yes | The OpenAPI document, as YAML. It must parse as YAML. |
+
+The API name is always the endpoint name. Validation reports problems with line numbers, as `config.yaml` does.
+
 ## Environment variables
 
 | Variable | Overrides | Notes |
