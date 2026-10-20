@@ -1,7 +1,10 @@
 package kong
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,110 +15,203 @@ import (
 	"github.com/kong/kong-loadgen/src/config"
 )
 
+// Configure pushes the generated configuration to Konnect. With kongctl it
+// manages the control plane declaratively and delegates gateway entities to
+// decK through the control plane's _deck block.
 func Configure(ctx context.Context, cfg config.Config, configPath string, dryRun, generateOnly bool, output io.Writer) error {
-	generated, err := Generate(cfg)
+	directory, err := writeGeneratedFiles(cfg, configPath)
 	if err != nil {
-		return err
-	}
-	directory := filepath.Join(filepath.Dir(configPath), "generated")
-	if err := writeGenerated(directory, generated); err != nil {
 		return err
 	}
 	fmt.Fprintf(output, "Generated Kong files in %s\n", directory)
 	if generateOnly {
 		return nil
 	}
-	if cfg.Konnect.Token == "" {
-		return fmt.Errorf("Konnect token is required; set KONNECT_TOKEN")
-	}
-	if _, err := exec.LookPath(cfg.Konnect.Tool); err != nil {
-		return missingToolError(cfg.Konnect.Tool)
+	if err := requireTools(cfg.Konnect.Tool); err != nil {
+		return err
 	}
 	if cfg.Konnect.Tool == "kongctl" {
-		if _, err := exec.LookPath("deck"); err != nil {
-			return fmt.Errorf("kongctl Gateway synchronization requires decK on PATH; install decK from https://developer.konghq.com/deck/")
-		}
 		return configureWithKongctl(ctx, cfg, directory, dryRun, output)
 	}
 	return configureWithDeck(ctx, cfg, directory, dryRun, output)
 }
 
-func Teardown(ctx context.Context, cfg config.Config, configPath string, output io.Writer) error {
-	generated, err := Generate(cfg)
+// Teardown removes only the entities tagged kong-loadgen. The control plane is
+// deleted too, but only when this tool created it.
+func Teardown(ctx context.Context, cfg config.Config, configPath string, assumeYes bool, output io.Writer, input io.Reader) error {
+	directory, err := writeGeneratedFiles(cfg, configPath)
 	if err != nil {
 		return err
 	}
-	directory := filepath.Join(filepath.Dir(configPath), "generated")
-	if err := writeGenerated(directory, generated); err != nil {
+	if err := requireTools(cfg.Konnect.Tool); err != nil {
 		return err
 	}
-	if cfg.Konnect.Token == "" {
-		return fmt.Errorf("Konnect token is required; set KONNECT_TOKEN")
-	}
-	if _, err := exec.LookPath("deck"); err != nil {
-		return missingToolError("deck")
-	}
-	deckCommandArgs := deckArgs(cfg, "sync", filepath.Join(directory, "teardown.yaml"))
-	deckCommandArgs = append(deckCommandArgs, "--yes")
-	fmt.Fprintln(output, "Planned teardown of Kong resources tagged kong-loadgen:")
-	if err := runDeckTool(ctx, cfg, deckCommandArgs, output); err != nil {
+	ownsControlPlane := cfg.Konnect.Tool == "kongctl" && cfg.Konnect.CreateControlPlane
+	controlPlane, found, err := findControlPlane(ctx, cfg)
+	if err != nil {
 		return err
 	}
-	if cfg.Konnect.Tool != "kongctl" || !cfg.Konnect.CreateControlPlane {
+	if !found {
+		fmt.Fprintf(output, "Control plane %q does not exist; nothing to tear down.\n", cfg.Konnect.ControlPlane)
 		return nil
 	}
-	if _, err := exec.LookPath("kongctl"); err != nil {
-		return missingToolError("kongctl")
+	if ownsControlPlane && controlPlane.Labels["managed-by"] != ManagedTag {
+		return fmt.Errorf("control plane %q was not created by kong-loadgen (missing label managed-by=%s); refusing to delete it", cfg.Konnect.ControlPlane, ManagedTag)
 	}
-	args := []string{"diff", "--mode", "delete", "--filename", filepath.Join(directory, "control-plane.yaml"), "--region", cfg.Konnect.Region}
-	fmt.Fprintln(output, "Planned teardown of the kong-loadgen control plane:")
-	if err := runTool(ctx, "kongctl", args, "KONGCTL_DEFAULT_KONNECT_PAT", cfg.Konnect.Token, output); err != nil {
+
+	state := filepath.Join(directory, "teardown.yaml")
+	fmt.Fprintln(output, "Planned removal of Gateway entities tagged kong-loadgen:")
+	if err := runDeck(ctx, cfg, output, "gateway", "diff", "--select-tag", ManagedTag, state); err != nil {
 		return err
 	}
-	args = []string{"delete", "--filename", filepath.Join(directory, "control-plane.yaml"), "--region", cfg.Konnect.Region, "--auto-approve"}
-	return runTool(ctx, "kongctl", args, "KONGCTL_DEFAULT_KONNECT_PAT", cfg.Konnect.Token, output)
+	if ownsControlPlane {
+		fmt.Fprintf(output, "Control plane %q will also be deleted.\n", cfg.Konnect.ControlPlane)
+	}
+	if !assumeYes {
+		confirmed, err := confirm(input, output)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(output, "Teardown cancelled.")
+			return nil
+		}
+	}
+	if err := runDeck(ctx, cfg, output, "gateway", "sync", "--select-tag", ManagedTag, "--yes", state); err != nil {
+		return err
+	}
+	if !ownsControlPlane {
+		return nil
+	}
+	manifest := filepath.Join(directory, "control-plane.yaml")
+	if err := runKongctl(ctx, cfg, output, "delete", "--filename", manifest, "--auto-approve"); err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "Deleted control plane %q.\n", cfg.Konnect.ControlPlane)
+	return nil
 }
 
 func configureWithKongctl(ctx context.Context, cfg config.Config, directory string, dryRun bool, output io.Writer) error {
 	manifest := filepath.Join(directory, "kongctl.yaml")
-	args := []string{"diff", "--mode", "sync", "--filename", manifest, "--region", cfg.Konnect.Region}
-	fmt.Fprintln(output, "Planned Konnect and Gateway changes:")
-	if err := runTool(ctx, "kongctl", args, "KONGCTL_DEFAULT_KONNECT_PAT", cfg.Konnect.Token, output); err != nil {
+	fmt.Fprintln(output, "Planned Konnect control plane changes:")
+	if err := runKongctl(ctx, cfg, output, "diff", "--mode", "sync", "--filename", manifest); err != nil {
 		return err
+	}
+	// kongctl diff lists the decK step but does not run it, so preview gateway
+	// entities directly. This needs the control plane to exist already.
+	_, exists, err := findControlPlane(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	state := filepath.Join(directory, "kong.yaml")
+	if exists {
+		fmt.Fprintln(output, "Planned Gateway changes:")
+		if err := runDeck(ctx, cfg, output, "gateway", "diff", "--select-tag", ManagedTag, state); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(output, "Gateway changes will be listed after the control plane is created.")
 	}
 	if dryRun {
 		return nil
 	}
-	args = []string{"sync", "--filename", manifest, "--region", cfg.Konnect.Region, "--auto-approve"}
-	return runTool(ctx, "kongctl", args, "KONGCTL_DEFAULT_KONNECT_PAT", cfg.Konnect.Token, output)
+	return runKongctl(ctx, cfg, output, "sync", "--filename", manifest, "--auto-approve")
 }
 
 func configureWithDeck(ctx context.Context, cfg config.Config, directory string, dryRun bool, output io.Writer) error {
 	state := filepath.Join(directory, "kong.yaml")
-	args := deckArgs(cfg, "diff", state)
 	fmt.Fprintln(output, "Planned Gateway changes:")
-	if err := runDeckTool(ctx, cfg, args, output); err != nil {
+	if err := runDeck(ctx, cfg, output, "gateway", "diff", "--select-tag", ManagedTag, state); err != nil {
 		return err
 	}
 	if dryRun {
 		return nil
 	}
-	args = deckArgs(cfg, "sync", state)
-	args = append(args, "--yes")
-	return runDeckTool(ctx, cfg, args, output)
+	return runDeck(ctx, cfg, output, "gateway", "sync", "--select-tag", ManagedTag, "--yes", state)
 }
 
-func runDeckTool(ctx context.Context, cfg config.Config, args []string, output io.Writer) error {
-	tokenFile, err := os.CreateTemp("", "kong-loadgen-konnect-token-*")
+func writeGeneratedFiles(cfg config.Config, configPath string) (string, error) {
+	generated, err := Generate(cfg)
+	if err != nil {
+		return "", err
+	}
+	directory := filepath.Join(filepath.Dir(configPath), "generated")
+	if err := writeGenerated(directory, generated); err != nil {
+		return "", err
+	}
+	return directory, nil
+}
+
+func requireTools(tool string) error {
+	if tool == "kongctl" {
+		if _, err := exec.LookPath("kongctl"); err != nil {
+			return missingToolError("kongctl")
+		}
+		// kongctl runs decK for the gateway entities, so both must be present.
+		if _, err := exec.LookPath("deck"); err != nil {
+			return missingToolError("deck")
+		}
+		return nil
+	}
+	if _, err := exec.LookPath("deck"); err != nil {
+		return missingToolError("deck")
+	}
+	return nil
+}
+
+// liveControlPlane is the subset of `kongctl get gateway control-planes` output we use.
+type liveControlPlane struct {
+	ID     string            `json:"id"`
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels"`
+}
+
+func findControlPlane(ctx context.Context, cfg config.Config) (liveControlPlane, bool, error) {
+	command := exec.CommandContext(ctx, "kongctl", "get", "gateway", "control-planes", "--region", cfg.Konnect.Region, "-o", "json")
+	command.Env = withEnvironment(os.Environ(), "KONGCTL_DEFAULT_KONNECT_PAT", cfg.Konnect.Token)
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	result, err := command.Output()
+	if err != nil {
+		return liveControlPlane{}, false, fmt.Errorf("list control planes: %s", redact(stderr.String()+err.Error(), cfg.Konnect.Token))
+	}
+	var planes []liveControlPlane
+	if err := json.Unmarshal(result, &planes); err != nil {
+		return liveControlPlane{}, false, fmt.Errorf("parse control planes: %w", err)
+	}
+	var matches []liveControlPlane
+	for _, plane := range planes {
+		if plane.Name == cfg.Konnect.ControlPlane {
+			matches = append(matches, plane)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return liveControlPlane{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		return liveControlPlane{}, false, fmt.Errorf("found %d control planes named %q; rename one before continuing", len(matches), cfg.Konnect.ControlPlane)
+	}
+}
+
+func confirm(input io.Reader, output io.Writer) (bool, error) {
+	fmt.Fprint(output, "Continue? Type yes to delete these resources: ")
+	line, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	return strings.TrimSpace(line) == "yes", nil
+}
+
+// runDeck runs decK with the Konnect connection flags. The token goes through a
+// 0600 temporary file rather than the command line, and is removed afterwards.
+func runDeck(ctx context.Context, cfg config.Config, output io.Writer, args ...string) error {
+	tokenFile, err := os.CreateTemp("", "kong-loadgen-token-*")
 	if err != nil {
 		return fmt.Errorf("create temporary token file: %w", err)
 	}
-	tokenPath := tokenFile.Name()
-	defer os.Remove(tokenPath)
-	if err := tokenFile.Chmod(0o600); err != nil {
-		tokenFile.Close()
-		return fmt.Errorf("secure temporary token file: %w", err)
-	}
+	defer os.Remove(tokenFile.Name())
 	if _, err := tokenFile.WriteString(cfg.Konnect.Token); err != nil {
 		tokenFile.Close()
 		return fmt.Errorf("write temporary token file: %w", err)
@@ -123,19 +219,18 @@ func runDeckTool(ctx context.Context, cfg config.Config, args []string, output i
 	if err := tokenFile.Close(); err != nil {
 		return fmt.Errorf("close temporary token file: %w", err)
 	}
-	globalFlags := []string{"--konnect-token-file", tokenPath}
-	args = append(args[:4], append(globalFlags, args[4:]...)...)
-	return runTool(ctx, "deck", args, "", "", output)
-}
-
-func deckArgs(cfg config.Config, operation, state string) []string {
-	return []string{
+	connection := []string{
 		"--konnect-addr", regionBaseURL(cfg.Konnect.Region),
 		"--konnect-control-plane-name", cfg.Konnect.ControlPlane,
-		"gateway", operation,
-		"--select-tag", ManagedTag,
-		state,
+		"--konnect-token-file", tokenFile.Name(),
 	}
+	return runTool(ctx, "deck", append(connection, args...), nil, cfg.Konnect.Token, output)
+}
+
+func runKongctl(ctx context.Context, cfg config.Config, output io.Writer, args ...string) error {
+	args = append(args, "--region", cfg.Konnect.Region)
+	env := []string{"KONGCTL_DEFAULT_KONNECT_PAT=" + cfg.Konnect.Token}
+	return runTool(ctx, "kongctl", args, env, cfg.Konnect.Token, output)
 }
 
 func regionBaseURL(region string) string {
@@ -160,24 +255,26 @@ func writeGenerated(directory string, generated Generated) error {
 	return nil
 }
 
-func runTool(ctx context.Context, name string, args []string, tokenVariable, token string, output io.Writer) error {
+// runTool runs an external tool, streams its combined output, and redacts the
+// Konnect token from everything it prints.
+func runTool(ctx context.Context, name string, args, extraEnv []string, secret string, output io.Writer) error {
 	command := exec.CommandContext(ctx, name, args...)
-	command.Env = os.Environ()
-	if tokenVariable != "" {
-		command.Env = withEnvironment(command.Env, tokenVariable, token)
-	}
+	command.Env = append(os.Environ(), extraEnv...)
 	result, err := command.CombinedOutput()
-	text := string(result)
-	if token != "" {
-		text = strings.ReplaceAll(text, token, "[REDACTED]")
-	}
-	if text != "" {
+	if text := redact(string(result), secret); text != "" {
 		fmt.Fprint(output, text)
 	}
 	if err != nil {
-		return fmt.Errorf("%s command failed: %w", name, err)
+		return fmt.Errorf("%s failed: %w", name, errors.New(redact(err.Error(), secret)))
 	}
 	return nil
+}
+
+func redact(text, secret string) string {
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "[REDACTED]")
 }
 
 func withEnvironment(environment []string, key, value string) []string {

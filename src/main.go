@@ -66,7 +66,7 @@ func newRootCommand() *cobra.Command {
 	configure.Flags().Bool("dry-run", false, "show planned changes without applying them")
 	configure.Flags().Bool("generate-only", false, "write generated files without contacting Konnect")
 	root.AddCommand(configure)
-	root.AddCommand(&cobra.Command{
+	teardown := &cobra.Command{
 		Use:   "teardown",
 		Short: "Remove Kong resources managed by this configuration",
 		Args:  cobra.NoArgs,
@@ -75,9 +75,12 @@ func newRootCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return kong.Teardown(cmd.Context(), cfg, path, cmd.OutOrStdout())
+			assumeYes, _ := cmd.Flags().GetBool("yes")
+			return kong.Teardown(cmd.Context(), cfg, path, assumeYes, cmd.OutOrStdout(), cmd.InOrStdin())
 		},
-	})
+	}
+	teardown.Flags().Bool("yes", false, "delete without asking for confirmation")
+	root.AddCommand(teardown)
 	return root
 }
 
