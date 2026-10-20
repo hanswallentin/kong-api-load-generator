@@ -103,7 +103,7 @@ Examples:
 				return err
 			}
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			withAPIs, _ := cmd.Flags().GetBool("with-apis")
+			withAPIs := apisRequested(cmd)
 			var items []apis.API
 			if withAPIs {
 				// Read the APIs file before anything changes, so a mistake in it costs nothing.
@@ -122,7 +122,7 @@ Examples:
 	}
 	configure.Flags().Bool("dry-run", false, "show planned changes without applying them")
 	configure.Flags().Bool("generate-only", false, "write generated files without contacting Konnect")
-	addAPIFlags(configure)
+	addAPIFlags(configure, true)
 	root.AddCommand(configure)
 	teardown := &cobra.Command{
 		Use: "teardown",
@@ -142,7 +142,7 @@ gateway entities, and one confirmation covers everything.`,
 			}
 			assumeYes, _ := cmd.Flags().GetBool("yes")
 			opts := kong.TeardownOptions{AssumeYes: assumeYes}
-			if withAPIs, _ := cmd.Flags().GetBool("with-apis"); withAPIs {
+			if apisRequested(cmd) {
 				for _, endpoint := range cfg.Endpoints {
 					opts.APINames = append(opts.APINames, endpoint.Name)
 				}
@@ -151,7 +151,7 @@ gateway entities, and one confirmation covers everything.`,
 		},
 	}
 	teardown.Flags().Bool("yes", false, "delete without asking for confirmation")
-	addAPIFlags(teardown)
+	addAPIFlags(teardown, false)
 	root.AddCommand(teardown)
 	root.AddCommand(newAPIsCommand())
 
@@ -293,10 +293,20 @@ func driftNotes(cfg config.Config, path string) []string {
 	return nil
 }
 
-// addAPIFlags adds the flags that switch on the Konnect APIs.
-func addAPIFlags(command *cobra.Command) {
+// addAPIFlags adds the flags that switch on the Konnect APIs. readsFile is true
+// for commands that read the APIs file; teardown names the APIs from config.yaml.
+func addAPIFlags(command *cobra.Command, readsFile bool) {
 	command.Flags().Bool("with-apis", false, "include one Konnect API per endpoint, described in apis.yaml")
-	command.Flags().String("apis-file", "", "APIs file to read with --with-apis (defaults to apis.yaml beside config.yaml)")
+	if readsFile {
+		command.Flags().String("apis-file", "", "APIs file to read (implies --with-apis; defaults to apis.yaml beside config.yaml)")
+	}
+}
+
+// apisRequested reports whether the APIs are wanted. Giving --apis-file counts as
+// asking for them, so a path is never silently ignored.
+func apisRequested(cmd *cobra.Command) bool {
+	withAPIs, _ := cmd.Flags().GetBool("with-apis")
+	return withAPIs || cmd.Flags().Changed("apis-file")
 }
 
 // apisPath returns the APIs file: --apis-file if given, else apis.yaml beside the config.
