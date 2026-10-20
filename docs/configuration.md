@@ -103,6 +103,8 @@ The simulated people. Each one becomes a Kong consumer with a key-auth credentia
 
 Each group creates users named `<name>-NN` and keys `<key_prefix>-NN`, where `NN` runs from `01` to `count`.
 
+Each group also becomes a Konnect consumer group, named after the group, that holds all of the group's users. Use it to scope plugins to a whole group in Konnect, or to find a group's users at a glance.
+
 ```yaml
 users:
   key_header: apikey

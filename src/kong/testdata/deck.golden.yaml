@@ -38,6 +38,14 @@ plugins:
     tags:
       - demo
       - kong-loadgen
+consumer_groups:
+  - name: mobile-app
+    tags:
+      - demo
+      - kong-loadgen
+    consumers:
+      - username: mobile-app-01
+      - username: mobile-app-02
 consumers:
   - username: mobile-app-01
     tags:

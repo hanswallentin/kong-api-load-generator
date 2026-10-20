@@ -63,6 +63,12 @@ func TestGenerateAddsIsolationAndGroupTagsToEveryEntity(t *testing.T) {
 func assertGolden(t *testing.T, name string, got []byte) {
 	t.Helper()
 	path := filepath.Join("testdata", name)
+	// UPDATE_GOLDEN=1 rewrites the golden files after the change has been reviewed.
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

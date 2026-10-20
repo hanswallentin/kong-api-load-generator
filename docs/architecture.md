@@ -55,7 +55,7 @@ The token goes to kongctl through `KONGCTL_DEFAULT_KONNECT_PAT`, and to decK thr
 ## Design decisions
 
 - **kongctl by default, decK for gateway entities.** kongctl's control-plane resources do not cover routes, plugins, consumers or keys, so decK does that through `_deck`. Choosing `tool: deck` skips kongctl and runs decK directly against an existing control plane.
-- **Identity is real Kong state.** Consumers and key-auth credentials are created in Konnect. The load generator sends the same keys, so Analytics shows the real consumer names.
+- **Identity is real Kong state.** Consumers and key-auth credentials are created in Konnect, and each user group becomes a consumer group that holds its users. The load generator sends the same keys, so Analytics shows the real consumer names.
 - **Keys are deterministic.** `key_prefix` plus index, so `run` can rebuild every key from the file, and no secrets store is needed.
 - **Attribution by sent credential.** The bucket is what the load generator sent. Konnect may attribute a request differently, for example a 404 with a valid key, and that is expected.
 - **No queuing under load.** Open-loop traffic that cannot be sent is dropped and counted. Queuing would hide the backend's slowness and distort the rate.

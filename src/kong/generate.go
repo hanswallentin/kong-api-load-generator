@@ -23,11 +23,12 @@ type Generated struct {
 }
 
 type deckState struct {
-	FormatVersion string     `yaml:"_format_version"`
-	Info          deckInfo   `yaml:"_info"`
-	Services      []service  `yaml:"services"`
-	Plugins       []plugin   `yaml:"plugins,omitempty"`
-	Consumers     []consumer `yaml:"consumers,omitempty"`
+	FormatVersion  string          `yaml:"_format_version"`
+	Info           deckInfo        `yaml:"_info"`
+	Services       []service       `yaml:"services"`
+	Plugins        []plugin        `yaml:"plugins,omitempty"`
+	ConsumerGroups []consumerGroup `yaml:"consumer_groups,omitempty"`
+	Consumers      []consumer      `yaml:"consumers,omitempty"`
 }
 
 type deckInfo struct {
@@ -54,6 +55,18 @@ type plugin struct {
 	Route  string         `yaml:"route,omitempty"`
 	Config map[string]any `yaml:"config,omitempty"`
 	Tags   []string       `yaml:"tags"`
+}
+
+// consumerGroup holds every generated user of one user group. decK expresses
+// membership from the group's side, so the members are listed here.
+type consumerGroup struct {
+	Name      string      `yaml:"name"`
+	Tags      []string    `yaml:"tags"`
+	Consumers []memberRef `yaml:"consumers"`
+}
+
+type memberRef struct {
+	Username string `yaml:"username"`
 }
 
 type consumer struct {
@@ -155,8 +168,13 @@ func build(cfg config.Config) (deckState, controlPlane, error) {
 		}
 	}
 	for _, group := range cfg.Users.Groups {
+		membership := consumerGroup{
+			Name: group.Name,
+			Tags: managedTags(cfg.Konnect.Tags),
+		}
 		for index := 1; index <= group.Count; index++ {
 			userTags := managedTags(append(append([]string(nil), cfg.Konnect.Tags...), group.Name))
+			membership.Consumers = append(membership.Consumers, memberRef{Username: group.Username(index)})
 			state.Consumers = append(state.Consumers, consumer{
 				Username: group.Username(index),
 				Tags:     userTags,
@@ -166,6 +184,7 @@ func build(cfg config.Config) (deckState, controlPlane, error) {
 				}},
 			})
 		}
+		state.ConsumerGroups = append(state.ConsumerGroups, membership)
 	}
 
 	control := controlPlane{
@@ -226,7 +245,7 @@ func Fingerprint(cfg config.Config) (map[string]string, error) {
 	values := map[string]any{
 		"services and routes":    state.Services,
 		"plugins":                state.Plugins,
-		"consumers and API keys": state.Consumers,
+		"consumers and API keys": map[string]any{"consumer groups": state.ConsumerGroups, "consumers": state.Consumers},
 		"control plane":          control,
 	}
 	parts := make(map[string]string, len(values))
