@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -76,7 +77,7 @@ func validate(cfg Config, root *yaml.Node, requireToken bool) []ValidationError 
 		add(loadNode["jitter"], "load.jitter must be between 0 and 1")
 	}
 	if cfg.Load.Client.Timeout.Value() <= 0 {
-		add(mappingValue(loadNode["client"])["timeout"], "load.client.timeout must be greater than zero")
+		add(firstNode(mappingValue(loadNode["client"])["timeout"], loadNode["client"], rootMap["load"]), "load.client.timeout must be greater than zero")
 	}
 	for i, status := range cfg.Load.ErrorStatuses {
 		if status < 400 || status > 599 {
@@ -162,6 +163,7 @@ func validate(cfg Config, root *yaml.Node, requireToken bool) []ValidationError 
 	if len(cfg.Endpoints) == 0 {
 		add(rootMap["endpoints"], "at least one endpoint is required")
 	}
+	sort.SliceStable(problems, func(i, j int) bool { return problems[i].Line < problems[j].Line })
 	return problems
 }
 

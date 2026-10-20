@@ -461,6 +461,9 @@ func (r *runner) perform(t *target, kind errorKind) {
 		r.stats.recordResponse(t.name, identity, 0, 0)
 		return
 	}
+	if host := r.cfg.Gateway.HostHeader; host != nil && *host != "" {
+		req.Host = *host
+	}
 	for name, value := range s.headers {
 		req.Header.Set(name, value)
 	}
