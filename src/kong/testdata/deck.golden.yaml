@@ -1,0 +1,63 @@
+_format_version: "3.0"
+_info:
+  select_tags:
+    - kong-loadgen
+services:
+  - name: orders-api
+    url: http://localhost:9000
+    tags:
+      - demo
+      - kong-loadgen
+    routes:
+      - name: orders-api-route
+        paths:
+          - /orders
+        methods:
+          - GET
+          - POST
+        strip_path: false
+        tags:
+          - demo
+          - kong-loadgen
+plugins:
+  - name: key-auth
+    route: orders-api-route
+    config:
+      key_in_body: false
+      key_in_header: true
+      key_in_query: false
+      key_names:
+        - apikey
+    tags:
+      - demo
+      - kong-loadgen
+  - name: rate-limiting
+    route: orders-api-route
+    config:
+      minute: 60
+    tags:
+      - demo
+      - kong-loadgen
+consumers:
+  - username: mobile-app-01
+    tags:
+      - demo
+      - kong-loadgen
+      - mobile-app
+    keyauth_credentials:
+      - key: mobile-01
+        tags:
+          - demo
+          - kong-loadgen
+          - mobile-app
+  - username: mobile-app-02
+    tags:
+      - demo
+      - kong-loadgen
+      - mobile-app
+    keyauth_credentials:
+      - key: mobile-02
+        tags:
+          - demo
+          - kong-loadgen
+          - mobile-app

@@ -1,0 +1,13 @@
+control_planes:
+  - ref: demo
+    name: demo
+    cluster_type: CLUSTER_TYPE_CONTROL_PLANE
+    labels:
+      managed-by: kong-loadgen
+    kongctl:
+      namespace: kong-loadgen
+    _deck:
+      files:
+        - kong.yaml
+      flags:
+        - --select-tag=kong-loadgen

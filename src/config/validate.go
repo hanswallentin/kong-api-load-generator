@@ -38,6 +38,9 @@ func Validate(cfg Config, root *yaml.Node) []ValidationError {
 	if cfg.Konnect.Tool != "kongctl" && cfg.Konnect.Tool != "deck" {
 		add(konnectNode["tool"], "konnect.tool must be kongctl or deck")
 	}
+	if cfg.Konnect.Tool == "deck" && cfg.Konnect.CreateControlPlane {
+		add(konnectNode["create_control_plane"], "konnect.tool: deck requires an existing control plane; set create_control_plane: false")
+	}
 	if !oneOf(cfg.Konnect.Region, "us", "eu", "au", "me", "in") {
 		add(konnectNode["region"], "konnect.region must be one of us, eu, au, me, in")
 	}

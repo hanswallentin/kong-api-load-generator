@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/kong/kong-loadgen/src/config"
+	"github.com/kong/kong-loadgen/src/kong"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -40,37 +41,72 @@ func newRootCommand() *cobra.Command {
 		Short: "Validate configuration and report problems with line numbers",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := configPath(cmd)
+			path, _, err := readValidatedConfig(cmd)
 			if err != nil {
 				return err
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return fmt.Errorf("read config %q: %w", path, err)
-			}
-			var document yaml.Node
-			if err := yaml.Unmarshal(data, &document); err != nil {
-				return err
-			}
-			var cfg config.Config
-			if err := document.Decode(&cfg); err != nil {
-				return err
-			}
-			if cfg.Konnect.Token == "" {
-				cfg.Konnect.Token = os.Getenv("KONNECT_TOKEN")
-			}
-			problems := config.Validate(cfg, documentRoot(&document))
-			if len(problems) > 0 {
-				for _, problem := range problems {
-					fmt.Fprintln(cmd.ErrOrStderr(), problem.Error())
-				}
-				return fmt.Errorf("configuration has %d problem(s)", len(problems))
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Configuration is valid: %s\n", path)
 			return nil
 		},
 	})
+	configure := &cobra.Command{
+		Use:   "configure",
+		Short: "Generate and synchronize tagged Kong resources to Konnect",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := readValidatedConfig(cmd)
+			if err != nil {
+				return err
+			}
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			generateOnly, _ := cmd.Flags().GetBool("generate-only")
+			return kong.Configure(cmd.Context(), cfg, path, dryRun, generateOnly, cmd.OutOrStdout())
+		},
+	}
+	configure.Flags().Bool("dry-run", false, "show planned changes without applying them")
+	configure.Flags().Bool("generate-only", false, "write generated files without contacting Konnect")
+	root.AddCommand(configure)
+	root.AddCommand(&cobra.Command{
+		Use:   "teardown",
+		Short: "Remove Kong resources managed by this configuration",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := readValidatedConfig(cmd)
+			if err != nil {
+				return err
+			}
+			return kong.Teardown(cmd.Context(), cfg, path, cmd.OutOrStdout())
+		},
+	})
 	return root
+}
+
+func readValidatedConfig(cmd *cobra.Command) (string, config.Config, error) {
+	path, err := configPath(cmd)
+	if err != nil {
+		return "", config.Config{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", config.Config{}, fmt.Errorf("read config %q: %w", path, err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return "", config.Config{}, err
+	}
+	var cfg config.Config
+	if err := document.Decode(&cfg); err != nil {
+		return "", config.Config{}, err
+	}
+	config.ApplyEnvironment(&cfg)
+	problems := config.Validate(cfg, documentRoot(&document))
+	if len(problems) > 0 {
+		for _, problem := range problems {
+			fmt.Fprintln(cmd.ErrOrStderr(), problem.Error())
+		}
+		return "", config.Config{}, fmt.Errorf("configuration has %d problem(s)", len(problems))
+	}
+	return path, cfg, nil
 }
 
 func configPath(cmd *cobra.Command) (string, error) {

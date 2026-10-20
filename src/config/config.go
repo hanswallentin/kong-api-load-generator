@@ -130,10 +130,19 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
-	if cfg.Konnect.Token == "" {
-		cfg.Konnect.Token = os.Getenv("KONNECT_TOKEN")
-	}
+	ApplyEnvironment(&cfg)
 	return cfg, nil
+}
+
+// ApplyEnvironment lets KONNECT_TOKEN and KONNECT_REGION override the file, so
+// secrets and per-machine settings never have to live in config.yaml.
+func ApplyEnvironment(cfg *Config) {
+	if token := os.Getenv("KONNECT_TOKEN"); token != "" {
+		cfg.Konnect.Token = token
+	}
+	if region := os.Getenv("KONNECT_REGION"); region != "" {
+		cfg.Konnect.Region = region
+	}
 }
 
 func (e Endpoint) RequestsPerSecond() float64 {
