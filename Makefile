@@ -20,7 +20,7 @@ dist:
 	    name=$(BINARY)-$$os-$$arch; \
 	    tmp=$$(mktemp -d); \
 	    GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o $$tmp/$(BINARY) ./src; \
-	    cp config.yaml README.md $$tmp/; \
+	    cp config.yaml apis.yaml README.md $$tmp/; \
 	    cp -R docs $$tmp/; \
 	    tar -czf dist/$$name.tar.gz -C $$tmp .; \
 	    rm -rf $$tmp; \
