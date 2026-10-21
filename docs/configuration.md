@@ -268,7 +268,7 @@ To see traffic per consumer, open Konnect Analytics, go to the Explorer, and gro
 
 ## apis.yaml (with --with-apis only)
 
-`apis.yaml` is read only by `configure --with-apis`, `teardown --with-apis` (which takes the endpoint names from `config.yaml`) and `apis init`. It is not part of `config.yaml`.
+The file is read only by `configure --with-apis` (or `configure --apis-file <path>`, which implies it), and written by `apis init`. `teardown --with-apis` takes the endpoint names from `config.yaml` and never reads this file. The file is separate from `config.yaml`, and its default name is `apis.yaml` beside the config. Use `--apis-file` to point at another file.
 
 | Key | Type | Required | Notes |
 | --- | --- | --- | --- |

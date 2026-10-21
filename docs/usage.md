@@ -125,7 +125,7 @@ kong-loadgen configure --with-apis     # create the APIs as well
 
 | Flag | Meaning |
 | --- | --- |
-| `--with-apis` | Create the APIs. Without it, `apis.yaml` is not read and no APIs are touched. |
+| `--with-apis` | Create the APIs from `apis.yaml`. Without it (and without `--apis-file`), no APIs are read or touched. |
 | `--apis-file <path>` | Read this file instead of `apis.yaml` beside `config.yaml`. Giving it implies `--with-apis`, so the file is always used. |
 
 The APIs live in their own kongctl namespace, `kong-loadgen-apis`, so a plain `configure` never deletes them. Removing an endpoint from `apis.yaml` and running `configure --with-apis` removes its API. `--dry-run` and `--generate-only` work as they do for the gateway. The spec for each API is written inline into `generated/kongctl-apis.yaml`.
